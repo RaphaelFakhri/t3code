@@ -220,6 +220,7 @@ describe.runIf(binaryPath !== undefined && ROOT !== "")("OpenCode 2 live orchest
         assert.isDefined(
           first.turnItems.find((item) => item.type === "dynamic_tool" && item.toolName === "read"),
         );
+        assert.isAbove(first.providerTurns[0]?.tokenUsage?.maxTokens ?? 0, 0);
 
         yield* send(
           threadId,

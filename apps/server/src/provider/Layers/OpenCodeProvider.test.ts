@@ -22,6 +22,7 @@ import {
 import * as OpenCodeServerOwner from "../OpenCodeServerOwner.ts";
 import {
   checkOpenCodeProviderStatus,
+  type OpenCode2Model,
   openCodeCommandsToServerProviderSlashCommands,
 } from "./OpenCodeProvider.ts";
 import type { OpenCodeInventory } from "../opencodeRuntime.ts";
@@ -325,6 +326,7 @@ const checkProvider = Effect.fn("checkProvider")(function* (
   cwd = process.cwd(),
   environment?: NodeJS.ProcessEnv,
   server = replayOpenCodeServer(OPENCODE_1_RESPONSES, settings.serverPassword),
+  openCode2Models: ReadonlyArray<OpenCode2Model> = [],
 ) {
   return yield* Effect.scoped(
     Effect.gen(function* () {
@@ -338,9 +340,12 @@ const checkProvider = Effect.fn("checkProvider")(function* (
         Effect.provideService(HttpClient.HttpClient, server),
         Effect.provideService(OpenCodeRuntime, OpenCodeRuntimeTestDouble),
       );
-      return yield* checkOpenCodeProviderStatus(settings, cwd, probe).pipe(
-        Effect.provideService(OpenCodeServerOwner.OpenCodeServerOwner, serverOwner),
-      );
+      return yield* checkOpenCodeProviderStatus(
+        settings,
+        cwd,
+        probe,
+        Effect.succeed(openCode2Models),
+      ).pipe(Effect.provideService(OpenCodeServerOwner.OpenCodeServerOwner, serverOwner));
     }),
   );
 });
@@ -527,14 +532,38 @@ it.layer(testLayer)("checkOpenCodeProviderStatus", (it) => {
     }),
   );
 
-  it.effect("offers a local OpenCode 2 binary in Full access only, never via 1.x", () =>
+  it.effect("lists a local OpenCode 2 binary's models in Full access only, never via 1.x", () =>
     Effect.gen(function* () {
       runtimeMock.state.versionStdout = "opencode v2.0.18\n";
-      const snapshot = yield* checkProvider(makeOpenCodeSettings());
+      const snapshot = yield* checkProvider(
+        makeOpenCodeSettings(),
+        process.cwd(),
+        undefined,
+        undefined,
+        [
+          { providerID: "opencode", id: "big-pickle", name: "Big Pickle", variants: [] },
+          {
+            providerID: "opencode",
+            id: "space-bunny-free",
+            name: "Space Bunny Free",
+            variants: [{ id: "low" }, { id: "medium" }, { id: "high" }],
+          },
+        ],
+      );
 
       NodeAssert.equal(snapshot.status, "ready");
       NodeAssert.equal(snapshot.version, "2.0.18");
       NodeAssert.deepEqual(snapshot.supportedRuntimeModes, ["full-access"]);
+      NodeAssert.deepEqual(
+        snapshot.models.map((model) => model.slug),
+        ["opencode/big-pickle", "opencode/space-bunny-free"],
+      );
+      const variant = snapshot.models.find((model) => model.slug === "opencode/space-bunny-free")
+        ?.capabilities?.optionDescriptors?.[0];
+      NodeAssert.deepEqual(
+        variant?.type === "select" ? variant.options.map((option) => option.id) : [],
+        ["low", "medium", "high"],
+      );
       NodeAssert.equal(runtimeMock.state.sdkClientInputs.length, 0);
     }),
   );
@@ -615,7 +644,7 @@ it.layer(testLayer)("checkOpenCodeProviderStatus with configured server URL", (i
         replayOpenCodeServer(OPENCODE_2_RESPONSES, "secret-password"),
       );
 
-      NodeAssert.equal(snapshot.status, "ready");
+      NodeAssert.equal(snapshot.status, "warning");
       NodeAssert.equal(snapshot.version, "2.0.18");
       NodeAssert.deepEqual(snapshot.supportedRuntimeModes, ["full-access"]);
       NodeAssert.equal(runtimeMock.state.sdkClientInputs.length, 0);

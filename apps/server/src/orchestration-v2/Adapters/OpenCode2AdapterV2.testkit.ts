@@ -8,6 +8,8 @@ import * as NodeServices from "@effect/platform-node/NodeServices";
 import {
   ProviderInstanceId,
   ProviderReplayEntry,
+  ProviderSessionId,
+  ThreadId,
   type ProviderReplayTranscript,
 } from "@t3tools/contracts";
 import * as Effect from "effect/Effect";
@@ -113,35 +115,61 @@ const replayHttpClient = (controller: OpenCodeReplayController) =>
     }).pipe(Effect.map((response) => HttpClientResponse.fromWeb(request, response))),
   );
 
+/** The 2.x adapter over a replayed server, checking at scope close that the transcript ran out. */
+const makeReplayAdapter = (transcript: ProviderReplayTranscript) =>
+  Effect.gen(function* () {
+    const controller = new OpenCodeReplayController(transcript);
+    yield* Effect.addFinalizer(() => Effect.sync(() => controller.assertComplete()));
+    const opencode = yield* OpenCode2Client.make.pipe(
+      Effect.provideService(HttpClient.HttpClient, replayHttpClient(controller)),
+    );
+    const connection = {
+      ...(yield* opencode.connect({ baseUrl: BASE_URL, password: "replay" })),
+      url: BASE_URL,
+      version: transcript.version,
+      external: true,
+    };
+    return makeOpenCode2Adapter({
+      instanceId: ProviderInstanceId.make("opencode"),
+      server: { withConnection: (use) => use(connection) },
+      idAllocator: yield* IdAllocatorV2,
+      serverConfig: yield* ServerConfig,
+    });
+  });
+
+const replayServerConfig = (scenario: string) =>
+  Layer.effect(ServerConfig, makeReplayServerConfig(scenario).pipe(Effect.orDie)).pipe(
+    Layer.provide(NodeServices.layer),
+  );
+
 function makeRegistryLayer(transcript: OpenCode2ReplayTranscript) {
-  const controller = new OpenCodeReplayController(transcript);
-  const serverConfigLayer = Layer.effect(
-    ServerConfig,
-    makeReplayServerConfig(transcript.scenario).pipe(Effect.orDie),
-  ).pipe(Layer.provide(NodeServices.layer));
   return Layer.unwrap(
-    Effect.gen(function* () {
-      yield* Effect.addFinalizer(() => Effect.sync(() => controller.assertComplete()));
-      const opencode = yield* OpenCode2Client.make.pipe(
-        Effect.provideService(HttpClient.HttpClient, replayHttpClient(controller)),
-      );
-      const connection = {
-        ...(yield* opencode.connect({ baseUrl: BASE_URL, password: "replay" })),
-        url: BASE_URL,
-        version: transcript.version,
-        external: true,
-      };
-      return makeLayer([
-        makeOpenCode2Adapter({
-          instanceId: ProviderInstanceId.make("opencode"),
-          server: { withConnection: (use) => use(connection) },
-          idAllocator: yield* IdAllocatorV2,
-          serverConfig: yield* ServerConfig,
-        }),
-      ]);
-    }),
-  ).pipe(Layer.provide(Layer.mergeAll(serverConfigLayer, idAllocatorLayer)));
+    makeReplayAdapter(transcript).pipe(Effect.map((adapter) => makeLayer([adapter]))),
+  ).pipe(Layer.provide(Layer.mergeAll(replayServerConfig(transcript.scenario), idAllocatorLayer)));
 }
+
+/** An open 2.x session runtime whose server answers from `entries`, for adapter-level tests. */
+export const openCode2ReplayRuntime = (entries: ReadonlyArray<ProviderReplayEntry>) =>
+  Effect.gen(function* () {
+    const adapter = yield* makeReplayAdapter({
+      provider: OPENCODE_PROVIDER,
+      protocol: OPENCODE2_HTTP_PROTOCOL,
+      version: "2.0.18",
+      scenario: "opencode2_adapter",
+      entries,
+    });
+    return yield* adapter.openSession({
+      threadId: ThreadId.make("thread:opencode2-adapter"),
+      providerSessionId: ProviderSessionId.make("provider-session:opencode2-adapter"),
+      modelSelection: {
+        instanceId: ProviderInstanceId.make("opencode"),
+        model: "opencode/big-pickle",
+      },
+      runtimePolicy: { runtimeMode: "full-access", interactionMode: "default", cwd: null },
+    });
+  }).pipe(
+    Effect.provide(Layer.mergeAll(replayServerConfig("opencode2_adapter"), idAllocatorLayer)),
+  );
 
 export const OpenCode2OrchestratorReplayHarness: OrchestratorV2ProviderReplayHarness<
   OpenCode2ReplayTranscript,

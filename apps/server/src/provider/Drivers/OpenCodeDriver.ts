@@ -270,6 +270,19 @@ export const OpenCodeDriver: ProviderDriver<OpenCodeSettings, OpenCodeDriverEnv>
           serverConfig,
         }),
       });
+      const loadOpenCode2Models = openCode2Server.withConnection((connection) =>
+        connection.client.model.list({ location: { directory: serverConfig.cwd } }).pipe(
+          Effect.map((models) => models.data),
+          Effect.mapError(
+            (cause) =>
+              new OpenCodeRuntimeError({
+                operation: "model.list",
+                detail: "The OpenCode server could not list its models.",
+                cause,
+              }),
+          ),
+        ),
+      );
       const serverOwner = yield* OpenCodeServerOwner.make({
         binaryPath: effectiveConfig.binaryPath,
         directory: serverConfig.cwd,
@@ -291,6 +304,7 @@ export const OpenCodeDriver: ProviderDriver<OpenCodeSettings, OpenCodeDriverEnv>
             effectiveConfig,
             serverConfig.cwd,
             runtimeProbe.refresh,
+            loadOpenCode2Models,
           ),
           usageLimits: readOpenCodeGoUsageLimits({
             enabled: effectiveConfig.enabled,
